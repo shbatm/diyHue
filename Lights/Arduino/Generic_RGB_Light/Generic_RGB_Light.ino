@@ -5,10 +5,12 @@
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <EEPROM.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include "pwm.c"
 
 #define PWM_CHANNELS 3
-const uint32_t period = 1024;
+const uint32_t period = 256;   // Should be a multiple of 256; 256 * 200ns = 19.5kHz
+const uint32_t multiplier = 1;  // period / 256. Used to calculate duty cycles
 
 #define use_hardware_switch false // on/off state and brightness can be controlled with above gpio pins. Is mandatory to connect them to ground with 10K resistors
 #define button1_pin 1 // on and bri up
@@ -17,10 +19,11 @@ const uint32_t period = 1024;
 //define pins
 uint32 io_info[PWM_CHANNELS][3] = {
   // MUX, FUNC, PIN
+  // Pin order: R, G, B, [W]
+  {PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5 ,  5},
   {PERIPHS_IO_MUX_MTDI_U,  FUNC_GPIO12, 12},
   {PERIPHS_IO_MUX_MTCK_U,  FUNC_GPIO13, 13},
-  {PERIPHS_IO_MUX_MTMS_U,  FUNC_GPIO14, 14},
-  //{PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5 ,  5},
+  //{PERIPHS_IO_MUX_MTMS_U,  FUNC_GPIO14, 14},
 };
 
 // initial duty: all off
@@ -38,6 +41,7 @@ float step_level[3], current_rgb[3], x, y;
 byte mac[6];
 
 ESP8266WebServer server(80);
+ESP8266HTTPUpdateServer httpUpdater;
 
 void convert_hue()
 {
@@ -229,7 +233,7 @@ void lightEngine() {
         in_transition = true;
         current_rgb[color] += step_level[color];
         if ((step_level[color] > 0.0f && current_rgb[color] > rgb[color]) || (step_level[color] < 0.0f && current_rgb[color] < rgb[color])) current_rgb[color] = rgb[color];
-        pwm_set_duty((int)(current_rgb[color] * 4), color);
+        pwm_set_duty((int)(current_rgb[color] * multiplier), color);
         pwm_start();
       }
     } else {
@@ -237,7 +241,7 @@ void lightEngine() {
         in_transition = true;
         current_rgb[color] -= step_level[color];
         if (current_rgb[color] < 0.0f) current_rgb[color] = 0;
-        pwm_set_duty((int)(current_rgb[color] * 4), color);
+        pwm_set_duty((int)(current_rgb[color] * multiplier), color);
         pwm_start();
       }
     }
@@ -291,6 +295,10 @@ void lightEngine() {
 void setup() {
   EEPROM.begin(512);
 
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
+
   for (uint8_t ch = 0; ch < PWM_CHANNELS; ch++) {
     pinMode(io_info[ch][2], OUTPUT);
   }
@@ -323,6 +331,14 @@ void setup() {
   }
   WiFi.macAddress(mac);
 
+  String host = WiFi.hostname();
+  char hostname[11];
+  host.toCharArray(hostname,11);
+
+  MDNS.begin(hostname);
+  httpUpdater.setup(&server);
+  MDNS.addService("http", "tcp", 80);
+
   // Port defaults to 8266
   // ArduinoOTA.setPort(8266);
 
@@ -331,7 +347,23 @@ void setup() {
 
   // No authentication by default
   // ArduinoOTA.setPassword((const char *)"123");
-
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start updating.");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
   ArduinoOTA.begin();
 
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the LED_BUILTIN pin as an output
@@ -482,7 +514,7 @@ void setup() {
   });
 
   server.on("/detect", []() {
-    server.send(200, "text/plain", "{\"hue\": \"bulb\",\"lights\": 1,\"modelid\": \"LCT001\",\"mac\": \"" + String(mac[5], HEX) + ":"  + String(mac[4], HEX) + ":" + String(mac[3], HEX) + ":" + String(mac[2], HEX) + ":" + String(mac[1], HEX) + ":" + String(mac[0], HEX) + "\"}");
+    server.send(200, "text/plain", "{\"hue\": \"bulb\",\"lights\": 1,\"modelid\": \"LST001\",\"mac\": \"" + String(mac[5], HEX) + ":"  + String(mac[4], HEX) + ":" + String(mac[3], HEX) + ":" + String(mac[2], HEX) + ":" + String(mac[1], HEX) + ":" + String(mac[0], HEX) + "\"}");
   });
 
   server.on("/", []() {
@@ -638,7 +670,6 @@ void setup() {
     server.send(200, "text/html", http_content);
 
   });
-
 
   server.onNotFound(handleNotFound);
 

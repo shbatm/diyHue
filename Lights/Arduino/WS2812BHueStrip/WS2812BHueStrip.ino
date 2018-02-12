@@ -7,8 +7,8 @@
 #include <WiFiManager.h>
 #include <EEPROM.h>
 
-#define lightsCount 3
-#define pixelCount 60
+#define lightsCount 1
+#define pixelCount 77
 
 #define use_hardware_switch false // on/off state and brightness can be controlled with above gpio pins. Is mandatory to connect them to ground with 10K resistors
 #define button1_pin 4 // on and bri up

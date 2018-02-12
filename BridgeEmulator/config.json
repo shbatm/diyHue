@@ -88,5 +88,9 @@
     "scenes": {},
     "schedules": {},
     "sensors": {},
-    "lights_address": {}
+    "lights_address": {},
+    "linkbutton": {
+        "lastlinkbuttonpushed": "1517072396",
+        "linkbutton_auth": "SHVlOkh1ZQ=="
+    }
 }

@@ -12,9 +12,10 @@
 const uint32_t period = 256;   // Should be a multiple of 256; 256 * 200ns = 19.5kHz
 const uint32_t multiplier = 1;  // period / 256. Used to calculate duty cycles
 
-#define use_hardware_switch false // on/off state and brightness can be controlled with above gpio pins. Is mandatory to connect them to ground with 10K resistors
-#define button1_pin 1 // on and bri up
-#define button2_pin 3 // off and bri down
+#define use_hardware_switch false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
+//For GPIO based on/off and brightness control, it is mandatory to connect the following GPIO pins to ground using 10k resistor
+#define button1_pin 1 // on and brightness up
+#define button2_pin 3 // off and brightness down
 
 //define pins
 uint32 io_info[PWM_CHANNELS][3] = {
@@ -572,7 +573,7 @@ void setup() {
     } else if (server.hasArg("alert")) {
       if (light_state) {
         current_rgb[0] = 0; current_rgb[1] = 0; current_rgb[2] = 0;
-      } 
+      }
     }
     for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
       if (light_state) {

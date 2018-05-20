@@ -395,8 +395,8 @@ def sendRequest(url, method, data, timeout=3, delay=0):
         return response.text
     elif method == "GET":
         response = requests.get(url, timeout=timeout, headers=head)
-        return response.text
-
+        return response.text 
+     
 def convert_rgb_xy(red,green,blue):
     red = pow((red + 0.055) / (1.0 + 0.055), 2.4) if red > 0.04045 else red / 12.92
     green = pow((green + 0.055) / (1.0 + 0.055), 2.4) if green > 0.04045 else green / 12.92
@@ -408,8 +408,8 @@ def convert_rgb_xy(red,green,blue):
     Z = red * 0.000088 + green * 0.072310 + blue * 0.986039
 
 #Calculate the xy values from the XYZ values
-    x = X / (X + Y + Z)
-    y = Y / (X + Y + Z)
+    x = (X / (X + Y + Z))
+    y = (Y / (X + Y + Z))
     return [x, y]
 
 def convert_xy(x, y, bri): #needed for milight hub that don't work with xy values
@@ -449,9 +449,44 @@ def convert_xy(x, y, bri): #needed for milight hub that don't work with xy value
 
     r = 0 if r < 0 else r
     g = 0 if g < 0 else g
-    b = 0 if b < 0 else b
-
+    b = 0 if b < 0 else b 
+    
     return [int(r * bri), int(g * bri), int(b * bri)]
+    
+def hsv_to_rgb(h, s, v): 
+    s = float(s / 254)
+    v = float(v / 254)
+    c=v*s
+    x=c*(1-abs(((h/11850)%2)-1))
+    m=v-c
+    if h>=0 and h<10992:
+        r=c
+        g=x
+        b=0
+    elif h>=10992 and h<21845:
+        r=x
+        g=c
+        b=0
+    elif h>=21845 and h<32837:
+        r = 0
+        g = c
+        b = x
+    elif h>=32837 and h<43830:
+        r = 0
+        g = x
+        b = c
+    elif h>=43830 and h<54813:
+        r = x
+        g = 0
+        b = c
+    else:
+        r = c
+        g = 0
+        b = x
+
+    r, g, b = int(r * 255), int(g * 255), int(b * 255)
+    return r, g, b
+
 
 def sendLightRequest(light, data):
     payload = {}
@@ -505,7 +540,7 @@ def sendLightRequest(light, data):
                 if key == "on":
                     payload["5850"] = int(value)
                 elif key == "transitiontime":
-                    payload["transitiontime"] = value
+                    payload["5712"] = value
                 elif key == "bri":
                     payload["5851"] = value
                 elif key == "ct":
@@ -518,6 +553,27 @@ def sendLightRequest(light, data):
                 elif key == "xy":
                     payload["5709"] = int(value[0] * 65535)
                     payload["5710"] = int(value[1] * 65535)
+            if "hue" in data or "sat" in data:                 
+                if("hue" in data):
+                    hue = data["hue"]
+                else:
+                    hue = bridge_config["lights"][light]["state"]["hue"]
+                if("sat" in data):
+                    sat = data["sat"]
+                else:
+                    sat = bridge_config["lights"][light]["state"]["sat"]
+                if("bri" in data):
+                    bri = data["bri"]
+                else:
+                    bri = bridge_config["lights"][light]["state"]["bri"]
+
+                #rgbValue = hsv_to_rgb(bridge_config["lights"][light]["state"]["hue"], bridge_config["lights"][light]["state"]["sat"], bridge_config["lights"][light]["state"]["bri"])
+                rgbValue = hsv_to_rgb(hue, sat, bri)
+                pprint(rgbValue) #validate the hsv_to_rgb works corectly
+                xyValue = convert_rgb_xy(rgbValue[0], rgbValue[1], rgbValue[2])
+                pprint(xyValue) #validate the xy values, here you can look the bulb
+                payload["5709"] = int(xyValue[0] * 65535)
+                payload["5710"] = int(xyValue[1] * 65535)
             if "5850" in payload and payload["5850"] == 0:
                 payload.clear() #setting brightnes will turn on the ligh even if there was a request to power off
                 payload["5850"] = 0
@@ -527,13 +583,11 @@ def sendLightRequest(light, data):
 
         try:
             if bridge_config["lights_address"][light]["protocol"] == "ikea_tradfri":
-                if "transitiontime" in payload:
-                    transitiontime = payload["transitiontime"]
-                else:
-                    transitiontime = 4
-                    for key, value in payload.items(): #ikea bulbs don't accept all arguments at once
-                        print(check_output("./coap-client-linux -m put -u \"" + bridge_config["lights_address"][light]["identity"] + "\" -k \"" + bridge_config["lights_address"][light]["preshared_key"] + "\" -e '{ \"3311\": [" + json.dumps({key : value, "5712": transitiontime}) + "] }' \"" + url + "\"", shell=True).split("\n")[3])
-                        sleep(0.5)
+                if "5712" not in payload:
+                    payload["5712"] = 4 #If no transition add one, might also add check to prevent large transitiontimes
+                pprint("PAYLOAD:" + json.dumps(payload))
+                pprint("COAP: ./coap-client-linux -m put -u \"" + bridge_config["lights_address"][light]["identity"] + "\" -k \"" + bridge_config["lights_address"][light]["preshared_key"] + "\" -e '{ \"3311\": [" + json.dumps(payload) + "] }' \"" + url + "\"")
+                check_output("./coap-client-linux -m put -u \"" + bridge_config["lights_address"][light]["identity"] + "\" -k \"" + bridge_config["lights_address"][light]["preshared_key"] + "\" -e '{ \"3311\": [" + json.dumps(payload) + "] }' \"" + url + "\"", shell=True)
             elif bridge_config["lights_address"][light]["protocol"] in ["hue", "deconz"]:
                 if "xy" in payload:
                     sendRequest(url, method, json.dumps({"on": True, "xy": payload["xy"]}))
@@ -555,7 +609,7 @@ def sendLightRequest(light, data):
 
 def updateGroupStats(light): #set group stats based on lights status in that group
     for group in bridge_config["groups"]:
-        if light in bridge_config["groups"][group]["lights"]:
+        if "lights" in group and light in bridge_config["groups"][group]["lights"]:
             for key, value in bridge_config["lights"][light]["state"].items():
                 if key not in ["on", "reachable"]:
                     bridge_config["groups"][group]["action"][key] = value
@@ -616,7 +670,7 @@ def syncWithLights(): #update Hue Bridge lights states
                     light_data = json.loads(sendRequest("http://" + bridge_config["lights_address"][light]["ip"] + "/api/" + bridge_config["lights_address"][light]["username"] + "/lights/" + bridge_config["lights_address"][light]["light_id"], "GET", "{}"))
                     bridge_config["lights"][light]["state"].update(light_data["state"])
                 elif bridge_config["lights_address"][light]["protocol"] == "ikea_tradfri":
-                    light_data = json.loads(check_output("./coap-client-linux -m get -u \"Client_identity\" -k \"" + bridge_config["lights_address"][light]["security_code"] + "\" \"coaps://" + bridge_config["lights_address"][light]["ip"] + ":5684/15001/" + str(bridge_config["lights_address"][light]["device_id"]) +"\"", shell=True).decode('utf-8').split("\n")[3])
+                    light_data = json.loads(check_output("./coap-client-linux -m get -u \"" + bridge_config["lights_address"][light]["identity"] + "\" -k \"" + bridge_config["lights_address"][light]["preshared_key"] + "\" \"coaps://" + bridge_config["lights_address"][light]["ip"] + ":5684/15001/" + str(bridge_config["lights_address"][light]["device_id"]) +"\"", shell=True).decode('utf-8').split("\n")[3])
                     bridge_config["lights"][light]["state"]["on"] = bool(light_data["3311"][0]["5850"])
                     bridge_config["lights"][light]["state"]["bri"] = light_data["3311"][0]["5851"]
                     if "5706" in light_data["3311"][0]:
@@ -729,37 +783,29 @@ def websocketClient():
                             message["state"]["buttonevent"] = rewriteDict[bridge_config["deconz"]["sensors"][message["id"]]["hueType"]][message["state"]["buttonevent"]]
                         #end change codes for emulated hue Switches
 
-                        #convert tradfri monion sensor notification to look like Hue Motion Sensor
-                        if message["state"] and bridge_config["sensors"][bridge_sensor_id]["modelid"] == "SML001":
-                            if "triggered" not in bridge_config["deconz"]["sensors"][message["id"]]:
-                                bridge_config["deconz"]["sensors"][message["id"]]["triggered"] = False
-                                bridge_config["deconz"]["sensors"][message["id"]]["last_triggered"] = "2017-01-31T00:00:00"
-
+                        #convert tradfri motion sensor notification to look like Hue Motion Sensor
+                        if message["state"] and bridge_config["deconz"]["sensors"][message["id"]]["modelid"] == "TRADFRI motion sensor":
                             #find the light sensor id
                             light_sensor = "0"
                             for sensor in bridge_config["sensors"].keys():
-                                if bridge_config["sensors"][sensor]["uniqueid"] == bridge_config["sensors"][bridge_sensor_id]["uniqueid"][:-1] + "0":
+                                if bridge_config["sensors"][sensor]["type"] == "ZLLLightLevel" and bridge_config["sensors"][sensor]["uniqueid"] == bridge_config["sensors"][bridge_sensor_id]["uniqueid"][:-1] + "0":
                                     light_sensor = sensor
                                     break
-
-                            if bridge_config["deconz"]["sensors"][message["id"]]["triggered"]: # conditions to turn on the lights where meet
-                                if not message["state"]["presence"]:
-                                    bridge_config["deconz"]["sensors"][message["id"]]["triggered"] = False
-                                    bridge_config["deconz"]["sensors"][message["id"]]["last_triggered"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-                                    print("clear triggered flag")
-                                else:
-                                    message["state"] = {}
+                            if message["state"]["dark"]:
+                                bridge_config["sensors"][light_sensor]["state"]["lightlevel"] = 6000
                             else:
-                                if message["state"]["presence"] and (message["state"]["dark"] or datetime.strptime(bridge_config["deconz"]["sensors"][message["id"]]["last_triggered"], "%Y-%m-%dT%H:%M:%S") > datetime.now() - timedelta(minutes=10)): # if motion detected when dark is true
-                                    bridge_config["deconz"]["sensors"][message["id"]]["triggered"] = True
-                                    bridge_config["sensors"][light_sensor]["state"]["lightlevel"] = 6000
-                                    message["state"]["dark"] = True # override because artificial light may change this to False
-                                    print("set triggered flag")
-                                else:
-                                    bridge_config["sensors"][light_sensor]["state"]["lightlevel"] = 25000
-                                bridge_config["sensors"][light_sensor]["state"]["dark"] = message["state"]["dark"]
-                                bridge_config["sensors"][light_sensor]["state"]["daylight"] = not message["state"]["dark"]
-                                bridge_config["sensors"][light_sensor]["state"]["lastupdated"] = message["state"]["lastupdated"]
+                                bridge_config["sensors"][light_sensor]["state"]["lightlevel"] = 25000
+                            if message["state"]["dark"] and not bridge_config["sensors"][light_sensor]["state"]["dark"]:
+                                sensors_state[light_sensor]["state"]["dark"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                            bridge_config["sensors"][light_sensor]["state"]["dark"] = message["state"]["dark"]
+                            bridge_config["sensors"][light_sensor]["state"]["daylight"] = not message["state"]["dark"]
+                            bridge_config["sensors"][light_sensor]["state"]["lastupdated"] = message["state"]["lastupdated"]
+
+                        #convert xiaomi motion sensor to hue sensor
+                        if message["state"] and bridge_config["deconz"]["sensors"][message["id"]]["modelid"] == "lumi.sensor_motion.aq2" and message["state"] and bridge_config["deconz"]["sensors"][message["id"]]["type"] == "ZHALightLevel":
+                            bridge_config["sensors"][bridge_sensor_id]["state"].update(message["state"])
+                            return
+                        ##############
 
                         bridge_config["sensors"][bridge_sensor_id]["state"].update(message["state"])
                         current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -779,7 +825,6 @@ def websocketClient():
                     if "state" in message:
                         bridge_config["lights"][bridge_light_id]["state"].update(message["state"])
                         updateGroupStats(bridge_light_id)
-
             except Exception as e:
                 print("unable to process the request" + str(e))
 
@@ -804,19 +849,22 @@ def scanDeconz():
     if "username" in bridge_config["deconz"]:
         deconz_config = json.loads(sendRequest("http://127.0.0.1:" + str(bridge_config["deconz"]["port"]) + "/api/" + bridge_config["deconz"]["username"] + "/config", "GET", "{}"))
         bridge_config["deconz"]["websocketport"] = deconz_config["websocketport"]
-        registered_deconz_lights = []
-        for light in bridge_config["lights_address"]:
-            if bridge_config["lights_address"][light]["protocol"] == "deconz":
-                registered_deconz_lights.append( bridge_config["lights_address"][light]["light_id"] )
+
         #lights
         deconz_lights = json.loads(sendRequest("http://127.0.0.1:" + str(bridge_config["deconz"]["port"]) + "/api/" + bridge_config["deconz"]["username"] + "/lights", "GET", "{}"))
         for light in deconz_lights:
-            if light not in registered_deconz_lights:
+            if light not in bridge_config["deconz"]["lights"]:
                 new_light_id = nextFreeId("lights")
                 print("register new light " + new_light_id)
                 bridge_config["lights"][new_light_id] = deconz_lights[light]
                 bridge_config["lights_address"][new_light_id] = {"username": bridge_config["deconz"]["username"], "light_id": light, "ip": "127.0.0.1:" + str(bridge_config["deconz"]["port"]), "protocol": "deconz"}
                 bridge_config["deconz"]["lights"][light] = {"bridgeid": new_light_id}
+            else: #temporary patch for config compatibility with new release
+                bridge_config["deconz"]["lights"][light]["modelid"] = deconz_lights[light]["modelid"]
+                bridge_config["deconz"]["lights"][light]["type"] = deconz_lights[light]["type"]
+
+
+
         #sensors
         deconz_sensors = json.loads(sendRequest("http://127.0.0.1:" + str(bridge_config["deconz"]["port"]) + "/api/" + bridge_config["deconz"]["username"] + "/sensors", "GET", "{}"))
         for sensor in deconz_sensors:
@@ -825,14 +873,28 @@ def scanDeconz():
                 if deconz_sensors[sensor]["modelid"] in ["TRADFRI remote control", "TRADFRI wireless dimmer"]:
                     print("register new " + deconz_sensors[sensor]["modelid"])
                     bridge_config["sensors"][new_sensor_id] = {"config": deconz_sensors[sensor]["config"], "manufacturername": deconz_sensors[sensor]["manufacturername"], "modelid": deconz_sensors[sensor]["modelid"], "name": deconz_sensors[sensor]["name"], "state": deconz_sensors[sensor]["state"], "swversion": deconz_sensors[sensor]["swversion"], "type": deconz_sensors[sensor]["type"], "uniqueid": deconz_sensors[sensor]["uniqueid"]}
-                    bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": new_sensor_id}
+                    bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": new_sensor_id, "modelid": deconz_sensors[sensor]["modelid"]}
                 elif deconz_sensors[sensor]["modelid"] == "TRADFRI motion sensor":
                     print("register TRADFRI motion sensor as Philips Motion Sensor")
                     newMotionSensorId = addHueMotionSensor("")
-                    bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": newMotionSensorId}
+                    bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": newMotionSensorId, "triggered": False, "modelid": deconz_sensors[sensor]["modelid"]}
+
+                elif deconz_sensors[sensor]["modelid"] == "lumi.sensor_motion.aq2":
+                    if deconz_sensors[sensor]["type"] == "ZHALightLevel":
+                        print("register new Xiaomi light sensor")
+                        bridge_config["sensors"][new_sensor_id] = {"name": "Hue ambient light sensor 1", "uniqueid": "00:17:88:01:02:" + deconz_sensors[sensor]["uniqueid"][12:], "type": "ZLLLightLevel", "swversion": "6.1.0.18912", "state": {"dark": True, "daylight": False, "lightlevel": 6000, "lastupdated": "none"}, "manufacturername": "Philips", "config": {"on": False,"battery": 100, "reachable": True, "alert": "none", "tholddark": 21597, "tholdoffset": 7000, "ledindication": False, "usertest": False, "pending": []}, "modelid": "SML001"}
+                        bridge_config["sensors"][str(int(new_sensor_id) + 1)] = {"name": "Hue temperature sensor 1", "uniqueid": "00:17:88:01:02:" + deconz_sensors[sensor]["uniqueid"][12:-1] + "2", "type": "ZLLTemperature", "swversion": "6.1.0.18912", "state": {"temperature": None, "lastupdated": "none"}, "manufacturername": "Philips", "config": {"on": False, "battery": 100, "reachable": True, "alert":"none", "ledindication": False, "usertest": False, "pending": []}, "modelid": "SML001"}
+                        bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": new_sensor_id}
+                    elif deconz_sensors[sensor]["type"] == "ZHAPresence":
+                        print("register new Xiaomi motion sensor")
+                        bridge_config["sensors"][new_sensor_id] = {"name": "Entrance Lights sensor", "uniqueid": "00:17:88:01:02:" + deconz_sensors[sensor]["uniqueid"][12:], "type": "ZLLPresence", "swversion": "6.1.0.18912", "state": {"lastupdated": "none", "presence": None}, "manufacturername": "Philips", "config": {"on": False,"battery": 100,"reachable": True, "alert": "lselect", "ledindication": False, "usertest": False, "sensitivity": 2, "sensitivitymax": 2,"pending": []}, "modelid": "SML001"}
+                        bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": new_sensor_id}
                 else:
                     bridge_config["sensors"][new_sensor_id] = deconz_sensors[sensor]
                     bridge_config["deconz"]["sensors"][sensor] = {"bridgeid": new_sensor_id}
+            else: #temporary patch for config compatibility with new release
+                bridge_config["deconz"]["sensors"][sensor]["modelid"] = deconz_sensors[sensor]["modelid"]
+                bridge_config["deconz"]["sensors"][sensor]["type"] = deconz_sensors[sensor]["type"]
         generateSensorsState()
 
         if "websocketport" in bridge_config["deconz"]:
@@ -1275,8 +1337,8 @@ class S(BaseHTTPRequestHandler):
                             else:
                                 all_on = False
                         self.wfile.write(bytes(json.dumps({"name":"Group 0","lights": [l for l in bridge_config["lights"]],"type":"LightGroup","state":{"all_on":all_on,"any_on":any_on},"recycle":False,"action":{"on":True,"bri":254,"hue":47258,"sat":253,"effect":"none","xy":[0.1424,0.0824],"ct":153,"alert":"none","colormode":"xy"}}), "utf8"))
-                    elif url_pices[4] == "timezones" and (url_pices[3] == "capabilities" or url_pices[3] == "info"): #print timezones
-                        self.wfile.write(bytes(json.dumps(["CET","CST6CDT","EET","EST","EST5EDT","HST","MET","MST","MST7MDT","PST8PDT","WET","Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Aruba","America/Asuncion","America/Atikokan","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Costa_Rica","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Fort_Nelson","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Inuvik","America/Iqaluit","America/Jamaica","America/Juneau","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Kentucky/Louisville","America/Kentucky/Monticello","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Chita","Asia/Choibalsan","Asia/Colombo","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kathmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qyzylorda","Asia/Riyadh","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ulaanbaatar","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faroe","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/Perth","Australia/Sydney","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Wake","Pacific/Wallis","US/Pacific-New"]), "utf8"))
+                    elif url_pices[3] == "info":
+                        self.wfile.write(bytes(json.dumps(bridge_config["capabilities"][url_pices[4]]), "utf8"))
                     else:
                         self.wfile.write(bytes(json.dumps(bridge_config[url_pices[3]][url_pices[4]]), "utf8"))
                 elif len(url_pices) == 6 or (len(url_pices) == 7 and url_pices[6] == ""):
@@ -1472,13 +1534,13 @@ class S(BaseHTTPRequestHandler):
                             bridge_config["lights"][light]["state"].update(put_dictionary)
                             sendLightRequest(light, put_dictionary)
                 elif url_pices[3] == "lights": #state is applied to a light
-                    sendLightRequest(url_pices[4], put_dictionary)
                     for key in put_dictionary.keys():
                         if key in ["ct", "xy"]: #colormode must be set by bridge
                             bridge_config["lights"][url_pices[4]]["state"]["colormode"] = key
                         elif key in ["hue", "sat"]:
                             bridge_config["lights"][url_pices[4]]["state"]["colormode"] = "hs"
                     updateGroupStats(url_pices[4])
+                    sendLightRequest(url_pices[4], put_dictionary)
                 if not url_pices[4] == "0": #group 0 is virtual, must not be saved in bridge configuration
                     try:
                         bridge_config[url_pices[3]][url_pices[4]][url_pices[5]].update(put_dictionary)

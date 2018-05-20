@@ -3,59 +3,112 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <ESP8266WebServer.h>
+#include <FastLED.h>
 #include <WiFiManager.h>
 #include <EEPROM.h>
-#include "pwm.c"
+#include "Arduino.h"
 
-#define PWM_CHANNELS 3
-const uint32_t period = 256;   // Should be a multiple of 256; 256 * 200ns = 19.5kHz
-const uint32_t multiplier = 1;  // period / 256. Used to calculate duty cycles
+// Needed for pwm library
+extern "C"{
+  #include "pwm.h"
+  #include "user_interface.h"
+}
 
+// Macro for getting max value
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+// Macro for getting min value
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+
+// Attempt at type checking, didn't work
+//#define ENSURE_int(i)       _Generic((i), int:    (i))
+//#define ENSURE_float(f)     _Generic((f), float:  (f))
+//
+//#define MAX(type, x, y)\
+//  (type)GENERIC_MAX(ENSURE_##type(x), ENSURE_##type(y))
+//
+//#define MIN(type, x, y)\
+//  (type)GENERIC_MIN(ENSURE_##type(x), ENSURE_##type(y))
+
+#define NUM_LEDS 1 // 1 led with 3 colors thanks to CRGB
+
+// Use Correction from fastLED library or not
+#define USE_F_LED_CC true
+
+// How many LED Colors are there including CW and/or WW
+// fastLED only controls rgb, not w
+#define LED_COLORS 4 
+
+// How many colors are controlled by basic PWM, not fastLED
+#define PWM_CHANNELS 1
+
+// FastLED settings, data and clock pin for spi communication
+// Note that the protocol for SM16716 is the same for the SM16726
+#define DATA_PIN 14
+#define CLOCK_PIN 4
+#define COLOR_ORDER RGB
+#define LED_TYPE SM16716
+#define CORRECTION TypicalSMD5050
+
+// May get messed up with SPI CLOCK_PIN with this particular bulb
 #define use_hardware_switch false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
 //For GPIO based on/off and brightness control, it is mandatory to connect the following GPIO pins to ground using 10k resistor
-#define button1_pin 1 // on and brightness up
-#define button2_pin 3 // off and brightness down
+#define button1_pin 4 // on and brightness up
+#define button2_pin 5 // off and brightness down
 
-//define pins
-uint32 io_info[PWM_CHANNELS][3] = {
-  // MUX, FUNC, PIN
-  // Pin order: R, G, B, [W]
-  {PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5 ,  5},
-  {PERIPHS_IO_MUX_MTDI_U,  FUNC_GPIO12, 12},
-  {PERIPHS_IO_MUX_MTCK_U,  FUNC_GPIO13, 13},
-  //{PERIPHS_IO_MUX_MTMS_U,  FUNC_GPIO14, 14},
-};
+// !!!!!!!! Experimental !!!!!!!!!! 
+// True - add cold white LEDs according to luminance/ whiteness in xy color selector
+// False - Don't
+#define W_ON_XY true
 
-// initial duty: all off
-uint32 pwm_duty_init[PWM_CHANNELS] = {0, 0, 0};
 
 // if you want to setup static ip uncomment these 3 lines and line 72
 //IPAddress strip_ip ( 192,  168,   10,  95);
 //IPAddress gateway_ip ( 192,  168,   10,   1);
 //IPAddress subnet_mask(255, 255, 255,   0);
 
-uint8_t rgb_multiplier[] = {100, 90, 30}; // light multiplier in percentage, max = 100
-uint8_t rgb[3], color_mode, scene;
+const uint32_t period = 1024;
+
+uint32 io_info[PWM_CHANNELS][3] = {
+  // MUX, FUNC, PIN
+  {PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5, 5},
+};
+
+uint32 pwm_duty_init[PWM_CHANNELS];
+
+uint8_t rgbw[4], color_mode, scene;
 bool light_state, in_transition;
 int transitiontime, ct, hue, bri, sat;
-float step_level[3], current_rgb[3], x, y;
+float step_level[4], current_rgbw[4], x, y;
 byte mac[6];
 
 ESP8266WebServer server(80);
-ESP8266HTTPUpdateServer httpUpdater;
+
+// InfoLight doesn't seem to work...
+CRGB red = CRGB(255, 0, 0);
+CRGB green = CRGB(0, 255, 0);
+CRGB white = CRGB(255, 255, 255);
+CRGB black = CRGB(0, 0, 0);
+
+// Set up array for use by FastLED
+CRGB leds[NUM_LEDS];
 
 void convert_hue()
 {
   double      hh, p, q, t, ff, s, v;
   long        i;
 
+  
   s = sat / 255.0;
   v = bri / 255.0;
 
+  // Test for intensity for white LEDs
+  float I = (float)(sat + bri) / 2;
+
   if (s <= 0.0) {      // < is bogus, just shuts up warnings
-    rgb[0] = v;
-    rgb[1] = v;
-    rgb[2] = v;
+    rgbw[0] = v;
+    rgbw[1] = v;
+    rgbw[2] = v;
     return;
   }
   hh = hue;
@@ -69,36 +122,42 @@ void convert_hue()
 
   switch (i) {
     case 0:
-      rgb[0] = v * 255.0;
-      rgb[1] = t * 255.0;
-      rgb[2] = p * 255.0;
+      rgbw[0] = v * 255.0;
+      rgbw[1] = t * 255.0;
+      rgbw[2] = p * 255.0;
+      rgbw[3] = I;
       break;
     case 1:
-      rgb[0] = q * 255.0;
-      rgb[1] = v * 255.0;
-      rgb[2] = p * 255.0;
+      rgbw[0] = q * 255.0;
+      rgbw[1] = v * 255.0;
+      rgbw[2] = p * 255.0;
+      rgbw[3] = I;
       break;
     case 2:
-      rgb[0] = p * 255.0;
-      rgb[1] = v * 255.0;
-      rgb[2] = t * 255.0;
+      rgbw[0] = p * 255.0;
+      rgbw[1] = v * 255.0;
+      rgbw[2] = t * 255.0;
+      rgbw[3] = I;
       break;
 
     case 3:
-      rgb[0] = p * 255.0;
-      rgb[1] = q * 255.0;
-      rgb[2] = v * 255.0;
+      rgbw[0] = p * 255.0;
+      rgbw[1] = q * 255.0;
+      rgbw[2] = v * 255.0;
+      rgbw[3] = I;
       break;
     case 4:
-      rgb[0] = t * 255.0;
-      rgb[1] = p * 255.0;
-      rgb[2] = v * 255.0;
+      rgbw[0] = t * 255.0;
+      rgbw[1] = p * 255.0;
+      rgbw[2] = v * 255.0;
+      rgbw[3] = I;
       break;
     case 5:
     default:
-      rgb[0] = v * 255.0;
-      rgb[1] = p * 255.0;
-      rgb[2] = q * 255.0;
+      rgbw[0] = v * 255.0;
+      rgbw[1] = p * 255.0;
+      rgbw[2] = q * 255.0;
+      rgbw[3] = I;
       break;
   }
 
@@ -106,22 +165,29 @@ void convert_hue()
 
 void convert_xy()
 {
-  float z = 1.0f - x - y;
+  int optimal_bri = bri;
+  if (optimal_bri < 5) {
+    optimal_bri = 5;
+  }
+  float Y = y;
+  float X = x;
+  float Z = 1.0f - x - y;
 
   // sRGB D65 conversion
-  float r =  x * 3.2406f - y * 1.5372f - z * 0.4986f;
-  float g = -x * 0.9689f + y * 1.8758f + z * 0.0415f;
-  float b =  x * 0.0557f - y * 0.2040f + z * 1.0570f;
+  float r =  X * 3.2406f - Y * 1.5372f - Z * 0.4986f;
+  float g = -X * 0.9689f + Y * 1.8758f + Z * 0.0415f;
+  float b =  X * 0.0557f - Y * 0.2040f + Z * 1.0570f;
 
-  // Apply gamma correction
+//  // Apply gamma correction v.2
+//  // Altering exponents at end can create different gamma curves
+//  r = r <= 0.04045f ? r / 12.92f : pow((r + 0.055f) / (1.0f + 0.055f), 2.4f);
+//  g = g <= 0.04045f ? g / 12.92f : pow((g + 0.055f) / (1.0f + 0.055f), 2.4f);
+//  b = b <= 0.04045f ? b / 12.92f : pow((b + 0.055f) / (1.0f + 0.055f), 2.4f);
+
+  // Apply gamma correction v.1 (better color accuracy), try this first!
   r = r <= 0.0031308f ? 12.92f * r : (1.0f + 0.055f) * pow(r, (1.0f / 2.4f)) - 0.055f;
   g = g <= 0.0031308f ? 12.92f * g : (1.0f + 0.055f) * pow(g, (1.0f / 2.4f)) - 0.055f;
   b = b <= 0.0031308f ? 12.92f * b : (1.0f + 0.055f) * pow(b, (1.0f / 2.4f)) - 0.055f;
-
-  // Apply multiplier for white correction
-  r = r * rgb_multiplier[0] / 100;
-  g = g * rgb_multiplier[1] / 100;
-  b = b * rgb_multiplier[2] / 100;
 
   if (r > b && r > g) {
     // red is biggest
@@ -152,10 +218,48 @@ void convert_xy()
   g = g < 0 ? 0 : g;
   b = b < 0 ? 0 : b;
 
-  rgb[0] = (int) (r * bri); rgb[1] = (int) (g * bri); rgb[2] = (int) (b * bri);
+  float ri = r;
+  float gi = g;
+  float bi = b;
+  ri = ri > 1.0f ? 1.0f : ri;
+  gi = gi > 1.0f ? 1.0f : gi;
+  bi = bi > 1.0f ? 1.0f : bi;
+  ri = ri < 0.0f ? 0.0f : ri;
+  gi = gi < 0.0f ? 0.0f : gi;
+  bi = bi < 0.0f ? 0.0f : bi;
+  float w = 0.0f;
+
+  // Getting luminance from value to add white leds
+  // https://stackoverflow.com/questions/40312216/converting-rgb-to-rgbw
+  if (W_ON_XY == true) {
+    float tM = MAX(ri, (MAX(gi, bi)));
+  
+    if(tM == 0) {
+      rgbw[0] = 0; rgbw[1] = 0; rgbw[2] = 0; rgbw[3] = 0;
+    }
+  
+    // Figure out what the colour with 100% hue is
+    float multiplier = 255.0f / tM;
+    float hR = ri * multiplier;
+    float hG = gi * multiplier;
+    float hB = bi * multiplier;
+  
+    // Calculate whiteness of color
+    float M = MAX(hR, MAX(hG,hB));
+    float m = MIN(hR, MIN(hG,hB));
+    float Luminance = ((M+m) / 2.0f - 127.5f) * (255.0f/127.5f) / multiplier;
+    w = Luminance < 0.0f ? 0.0f : Luminance;
+    w = Luminance > 255.0f ? 255.0f : Luminance;
+  } else {
+    w = 0.0f;
+  }
+
+  rgbw[0] = (int) (r * optimal_bri); rgbw[1] = (int) (g * optimal_bri); rgbw[2] = (int) (b * optimal_bri); rgbw[3] = (int) ((w * bri) /3);
 }
 
 void convert_ct() {
+
+  int optimal_bri = int( 10 + bri / 1.04);
   int hectemp = 10000 / ct;
   int r, g, b;
   if (hectemp <= 66) {
@@ -167,17 +271,16 @@ void convert_ct() {
     g = 288.1221695283 * pow(hectemp - 60, -0.0755148492);
     b = 255;
   }
+  float w = 0;
+  uint8 percent_warm = ((ct - 150) * 100) / 350;
 
-  // Apply multiplier for white correction
-  r = r * rgb_multiplier[0] / 100;
-  g = g * rgb_multiplier[1] / 100;
-  b = b * rgb_multiplier[2] / 100;
-  
+  w = ((optimal_bri * (100 - percent_warm)) / 100) / 3;
+
+  w = w > 255 ? 255 : w;
   r = r > 255 ? 255 : r;
   g = g > 255 ? 255 : g;
   b = b > 255 ? 255 : b;
-  
-  rgb[0] = r * (bri / 255.0f); rgb[1] = g * (bri / 255.0f); rgb[2] = b * (bri / 255.0f);
+  rgbw[0] = r * (bri / 255.0f); rgbw[1] = g * (bri / 255.0f); rgbw[2] = b * (bri / 255.0f); rgbw[3] = w;
 }
 
 void handleNotFound() {
@@ -194,6 +297,16 @@ void handleNotFound() {
   }
   server.send(404, "text/plain", message);
 }
+
+void infoLight(CRGB color) {
+  // Flash the strip in the selected color. White = booted, green = WLAN connected, red = WLAN could not connect
+  leds[0]= color;
+  FastLED.show();
+  FastLED.delay(10);
+  leds[0] = CRGB::Black;
+  FastLED.show();
+}
+
 
 void apply_scene(uint8_t new_scene) {
   if ( new_scene == 0) {
@@ -222,6 +335,7 @@ void apply_scene(uint8_t new_scene) {
 }
 
 void process_lightdata(float transitiontime) {
+//  transitiontime *= 17 - (pixelCount / 40); //every extra led add a small delay that need to be counted
   if (color_mode == 1 && light_state == true) {
     convert_xy();
   } else if (color_mode == 2 && light_state == true) {
@@ -230,101 +344,72 @@ void process_lightdata(float transitiontime) {
     convert_hue();
   }
   transitiontime *= 16;
-  for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
+  for (uint8_t color = 0; color < LED_COLORS; color++) {
     if (light_state) {
-      step_level[color] = (rgb[color] - current_rgb[color]) / transitiontime;
+      step_level[color] = ((float)rgbw[color] - current_rgbw[color]) / transitiontime;
     } else {
-      step_level[color] = current_rgb[color] / transitiontime;
+      step_level[color] = current_rgbw[color] / transitiontime;
     }
   }
 }
 
+// function to get white pwm value
+
+
 void lightEngine() {
-  for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
+  for (uint8_t color = 0; color < LED_COLORS; color++) {
     if (light_state) {
-      if (rgb[color] != current_rgb[color] ) {
+      if (rgbw[color] != current_rgbw[color] ) {
         in_transition = true;
-        current_rgb[color] += step_level[color];
-        if ((step_level[color] > 0.0f && current_rgb[color] > rgb[color]) || (step_level[color] < 0.0f && current_rgb[color] < rgb[color])) current_rgb[color] = rgb[color];
-        pwm_set_duty((int)(current_rgb[color] * multiplier), color);
+        current_rgbw[color] += step_level[color];
+        if ((step_level[color] > 0.0f && current_rgbw[color] > rgbw[color]) || (step_level[color] < 0.0f && current_rgbw[color] < rgbw[color])) current_rgbw[color] = rgbw[color];
+        leds[0]=CRGB((int)current_rgbw[0], (int)current_rgbw[1], (int)current_rgbw[2]);
+        FastLED.show();
+        pwm_set_duty((int)(current_rgbw[3] * 4), 0);
         pwm_start();
       }
     } else {
-      if (current_rgb[color] != 0) {
+      if (current_rgbw[color] != 0) {
         in_transition = true;
-        current_rgb[color] -= step_level[color];
-        if (current_rgb[color] < 0.0f) current_rgb[color] = 0;
-        pwm_set_duty((int)(current_rgb[color] * multiplier), color);
+        current_rgbw[color] -= step_level[color];
+        if (current_rgbw[color] < 0.0f) current_rgbw[color] = 0;
+        leds[0]=CRGB((int)current_rgbw[0], (int)current_rgbw[1], (int)current_rgbw[2]);
+        FastLED.show();
+        pwm_set_duty((int)(current_rgbw[3] * 4), 0);
         pwm_start();
       }
     }
   }
   if (in_transition) {
-    delay(6);
+    FastLED.delay(6);
     in_transition = false;
-  } else if (use_hardware_switch == true) {
-    if (digitalRead(button1_pin) == HIGH) {
-      int i = 0;
-      while (digitalRead(button1_pin) == HIGH && i < 30) {
-        delay(20);
-        i++;
-      }
-      if (i < 30) {
-        // there was a short press
-        light_state = true;
-      }
-      else {
-        // there was a long press
-        bri += 56;
-        if (bri > 254) {
-          // don't increase the brightness more then maximum value
-          bri = 254;
-        }
-      }
-      process_lightdata(4);
-    } else if (digitalRead(button2_pin) == HIGH) {
-      int i = 0;
-      while (digitalRead(button2_pin) == HIGH && i < 30) {
-        delay(20);
-        i++;
-      }
-      if (i < 30) {
-        // there was a short press
-        light_state = false;
-      }
-      else {
-        // there was a long press
-        bri -= 56;
-        if (bri < 1) {
-          // don't decrease the brightness less than minimum value.
-          bri = 1;
-        }
-      }
-      process_lightdata(4);
-    }
   }
 }
 
 void setup() {
+  if(USE_F_LED_CC == true) {
+    FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( CORRECTION );   
+  } else {
+    FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, COLOR_ORDER>(leds, NUM_LEDS); 
+  }
   EEPROM.begin(512);
-
-  Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  Serial.println();
 
   for (uint8_t ch = 0; ch < PWM_CHANNELS; ch++) {
     pinMode(io_info[ch][2], OUTPUT);
+    
   }
 
+  for (uint8_t channel = 0; channel < PWM_CHANNELS; channel++) {
+    pwm_duty_init[channel] = 0;
+  }
+  
   pwm_init(period, pwm_duty_init, PWM_CHANNELS, io_info);
   pwm_start();
-
   //WiFi.config(strip_ip, gateway_ip, subnet_mask);
 
   apply_scene(EEPROM.read(2));
-  for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
-    step_level[color] = rgb[color] / 150.0;
-  }
+  step_level[0] = rgbw[0] / 150.0; step_level[1] = rgbw[1] / 150.0; step_level[2] = rgbw[2] / 150.0; step_level[3] = rgbw[3] / 150.0;
+
 
   if (EEPROM.read(1) == 1 || (EEPROM.read(1) == 0 && EEPROM.read(0) == 1)) {
     light_state = true;
@@ -332,25 +417,22 @@ void setup() {
       lightEngine();
     }
   }
+
   WiFiManager wifiManager;
   wifiManager.autoConnect("New Hue Light");
-  if (! light_state)  {
+
+  if (! light_state) {
+    infoLight(white);
+    while (WiFi.status() != WL_CONNECTED) {
+      infoLight(red);
+      delay(500);
+    }
     // Show that we are connected
-    pwm_set_duty(100, 1);
-    pwm_start();
-    delay(500);
-    pwm_set_duty(0, 1);
-    pwm_start();
+    infoLight(green);
+
   }
+
   WiFi.macAddress(mac);
-
-  String host = WiFi.hostname();
-  char hostname[11];
-  host.toCharArray(hostname,11);
-
-  MDNS.begin(hostname);
-  httpUpdater.setup(&server);
-  MDNS.addService("http", "tcp", 80);
 
   // Port defaults to 8266
   // ArduinoOTA.setPort(8266);
@@ -360,25 +442,9 @@ void setup() {
 
   // No authentication by default
   // ArduinoOTA.setPassword((const char *)"123");
-  ArduinoOTA.onStart([]() {
-    Serial.println("Start updating.");
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
-  });
-  ArduinoOTA.begin();
 
+  ArduinoOTA.begin();
+  
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the LED_BUILTIN pin as an output
   digitalWrite(LED_BUILTIN, HIGH);  // Turn the LED off by making the voltage HIGH
   if (use_hardware_switch == true) {
@@ -427,11 +493,11 @@ void setup() {
     } else if (button == 4000) {
       light_state = false;
     }
-    for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
+    for (uint8_t color = 0; color < LED_COLORS; color++) {
       if (light_state) {
-        step_level[color] = (rgb[color] - current_rgb[color]) / 54;
+        step_level[color] = (rgbw[color] - current_rgbw[color]) / 54;
       } else {
-        step_level[color] = current_rgb[color] / 54;
+        step_level[color] = current_rgbw[color] / 54;
       }
     }
   });
@@ -439,7 +505,7 @@ void setup() {
 
   server.on("/set", []() {
     light_state = true;
-    int transitiontime = 4;
+    float transitiontime = 4;
     for (uint8_t i = 0; i < server.args(); i++) {
       if (server.argName(i) == "on") {
         if (server.arg(i) == "True" || server.arg(i) == "true") {
@@ -458,15 +524,19 @@ void setup() {
         }
       }
       else if (server.argName(i) == "r") {
-        rgb[0] = server.arg(i).toInt();
+        rgbw[0] = server.arg(i).toInt();
         color_mode = 0;
       }
       else if (server.argName(i) == "g") {
-        rgb[1] = server.arg(i).toInt();
+        rgbw[1] = server.arg(i).toInt();
         color_mode = 0;
       }
       else if (server.argName(i) == "b") {
-        rgb[2] = server.arg(i).toInt();
+        rgbw[2] = server.arg(i).toInt();
+        color_mode = 0;
+      }
+      else if (server.argName(i) == "w") {
+        rgbw[3] = server.arg(i).toInt();
         color_mode = 0;
       }
       else if (server.argName(i) == "x") {
@@ -500,9 +570,9 @@ void setup() {
       }
       else if (server.argName(i) == "alert" && server.arg(i) == "select") {
         if (light_state) {
-          current_rgb[0] = 0; current_rgb[1] = 0; current_rgb[2] = 0;
+          current_rgbw[0] = 0; current_rgbw[1] = 0; current_rgbw[2] = 0; current_rgbw[3] = 0;
         } else {
-          current_rgb[0] = 255; current_rgb[1] = 255; current_rgb[2] = 255;
+          current_rgbw[0] = 255; current_rgbw[1] = 255; current_rgbw[2] = 255; current_rgbw[3] = 255;
         }
       }
       else if (server.argName(i) == "transitiontime") {
@@ -510,7 +580,21 @@ void setup() {
       }
     }
     server.send(200, "text/plain", "OK, x: " + (String)x + ", y:" + (String)y + ", bri:" + (String)bri + ", ct:" + ct + ", colormode:" + color_mode + ", state:" + light_state);
-    process_lightdata(transitiontime);
+    if (color_mode == 1 && light_state == true) {
+      convert_xy();
+    } else if (color_mode == 2 && light_state == true) {
+      convert_ct();
+    } else if (color_mode == 3 && light_state == true) {
+      convert_hue();
+    }
+    transitiontime *= 16;
+    for (uint8_t color = 0; color < LED_COLORS; color++) {
+      if (light_state) {
+        step_level[color] = (rgbw[color] - current_rgbw[color]) / transitiontime;
+      } else {
+        step_level[color] = current_rgbw[color] / transitiontime;
+      }
+    }
   });
 
   server.on("/get", []() {
@@ -524,10 +608,11 @@ void setup() {
     else if (color_mode == 3)
       colormode = "hs";
     server.send(200, "text/plain", "{\"on\": " + power_status + ", \"bri\": " + (String)bri + ", \"xy\": [" + (String)x + ", " + (String)y + "], \"ct\":" + (String)ct + ", \"sat\": " + (String)sat + ", \"hue\": " + (String)hue + ", \"colormode\": \"" + colormode + "\"}");
-  });
+  });  
+
 
   server.on("/detect", []() {
-    server.send(200, "text/plain", "{\"hue\": \"bulb\",\"lights\": 1,\"modelid\": \"LST001\",\"mac\": \"" + String(mac[5], HEX) + ":"  + String(mac[4], HEX) + ":" + String(mac[3], HEX) + ":" + String(mac[2], HEX) + ":" + String(mac[1], HEX) + ":" + String(mac[0], HEX) + "\"}");
+    server.send(200, "text/plain", "{\"hue\": \"bulb\",\"lights\": 1,\"modelid\": \"LCT015\",\"mac\": \"" + String(mac[5], HEX) + ":"  + String(mac[4], HEX) + ":" + String(mac[3], HEX) + ":" + String(mac[2], HEX) + ":" + String(mac[1], HEX) + ":" + String(mac[0], HEX) + "\"}");
   });
 
   server.on("/", []() {
@@ -584,19 +669,23 @@ void setup() {
       EEPROM.commit();
     } else if (server.hasArg("alert")) {
       if (light_state) {
-        current_rgb[0] = 0; current_rgb[1] = 0; current_rgb[2] = 0;
+        current_rgbw[0] = 0; current_rgbw[1] = 0; current_rgbw[2] = 0; current_rgbw[3] = 0;
+      } else {
+        current_rgbw[3] = 255;
       }
     }
-    for (uint8_t color = 0; color < PWM_CHANNELS; color++) {
+    for (uint8_t color = 0; color < LED_COLORS; color++) {
       if (light_state) {
-        step_level[color] = ((float)rgb[color] - current_rgb[color]) / transitiontime;
+        step_level[color] = ((float)rgbw[color] - current_rgbw[color]) / transitiontime;
       } else {
-        step_level[color] = current_rgb[color] / transitiontime;
+        step_level[color] = current_rgbw[color] / transitiontime;
       }
     }
     if (server.hasArg("reset")) {
       ESP.reset();
     }
+
+
 
 
     String http_content = "<!doctype html>";
@@ -684,6 +773,7 @@ void setup() {
 
   });
 
+
   server.onNotFound(handleNotFound);
 
   server.begin();
@@ -693,9 +783,4 @@ void loop() {
   ArduinoOTA.handle();
   server.handleClient();
   lightEngine();
-}
-
-
-extern "C" {
-#include "pwm.h"
 }

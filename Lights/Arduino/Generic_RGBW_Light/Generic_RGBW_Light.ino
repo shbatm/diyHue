@@ -1,4 +1,5 @@
 #include <ESP8266WiFi.h>
+
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -18,10 +19,11 @@ const uint32_t period = 1024;
 //define pins
 uint32 io_info[PWM_CHANNELS][3] = {
   // MUX, FUNC, PIN
+  // Pinout for ESP8265-M2 based MiLight RGBWW Dongle From AliExpress
   {PERIPHS_IO_MUX_MTDI_U,  FUNC_GPIO12, 12},
-  {PERIPHS_IO_MUX_MTCK_U,  FUNC_GPIO13, 13},
-  {PERIPHS_IO_MUX_MTMS_U,  FUNC_GPIO14, 14},
   {PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5 ,  5},
+  {PERIPHS_IO_MUX_MTCK_U,  FUNC_GPIO13, 13},
+  {PERIPHS_IO_MUX_MTDO_U,  FUNC_GPIO15 ,15},
 };
 
 // initial duty: all off

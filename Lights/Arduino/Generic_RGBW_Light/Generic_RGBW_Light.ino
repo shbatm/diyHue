@@ -29,7 +29,7 @@ uint32 io_info[PWM_CHANNELS][3] = {
 // initial duty: all off
 uint32 pwm_duty_init[PWM_CHANNELS] = {0, 0, 0, 0};
 
-// if you want to setup static ip uncomment these 3 lines and line 72
+// if you want to setup static ip uncomment these 3 lines and line 305
 //IPAddress strip_ip ( 192,  168,   10,  95);
 //IPAddress gateway_ip ( 192,  168,   10,   1);
 //IPAddress subnet_mask(255, 255, 255,   0);
@@ -39,8 +39,10 @@ bool light_state, in_transition;
 int transitiontime, ct, hue, bri, sat;
 float step_level[4], current_rgbw[4], x, y;
 byte mac[6];
+byte packetBuffer[4];
 
 ESP8266WebServer server(80);
+WiFiUDP Udp;
 
 void convert_hue()
 {
@@ -335,6 +337,7 @@ void setup() {
   // ArduinoOTA.setPassword((const char *)"123");
 
   ArduinoOTA.begin();
+  Udp.begin(2100);
 
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the LED_BUILTIN pin as an output
   digitalWrite(LED_BUILTIN, HIGH);  // Turn the LED off by making the voltage HIGH
@@ -654,8 +657,20 @@ void setup() {
   server.begin();
 }
 
+void entertainment(){
+  int packetSize = Udp.parsePacket();
+  if (packetSize) {
+    Udp.read(packetBuffer, packetSize);
+    for (uint8_t color = 0; color < 3; color++) {
+      pwm_set_duty((int)(packetBuffer[color] * 4), color);
+    }
+    pwm_start();
+  }
+}
+
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
   lightEngine();
+  entertainment();
 }

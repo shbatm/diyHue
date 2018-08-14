@@ -15,7 +15,7 @@
 #define button1_pin 4 // on and brightness up
 #define button2_pin 5 // off and brightness down
 
-// if you want to setup static ip uncomment these 3 lines and line 72
+// if you want to setup static ip uncomment these 3 lines and line 324
 //IPAddress strip_ip ( 192,  168,   10,  95);
 //IPAddress gateway_ip ( 192,  168,   10,   1);
 //IPAddress subnet_mask(255, 255, 255,   0);
@@ -25,8 +25,10 @@ bool light_state[lightsCount], in_transition;
 int transitiontime[lightsCount], ct[lightsCount], hue[lightsCount], bri[lightsCount], sat[lightsCount];
 float step_level[lightsCount][4], current_rgbw[lightsCount][4], x[lightsCount], y[lightsCount];
 byte mac[6];
+byte packetBuffer[4];
 
 ESP8266WebServer server(80);
+WiFiUDP Udp;
 
 RgbwColor red = RgbwColor(255, 0, 0, 0);
 RgbwColor green = RgbwColor(0, 255, 0, 0);
@@ -363,6 +365,7 @@ void setup() {
   // ArduinoOTA.setPassword((const char *)"123");
 
   ArduinoOTA.begin();
+  Udp.begin(2100);
 
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the LED_BUILTIN pin as an output
   digitalWrite(LED_BUILTIN, HIGH);  // Turn the LED off by making the voltage HIGH
@@ -445,19 +448,19 @@ void setup() {
         EEPROM.commit();
       }
       else if (server.argName(i) == "r") {
-        rgbw[light][0] = server.arg(i).toInt();
+        rgbw[light][0] = server.arg(i).toInt(); rgbw[light][3] = 0;
         color_mode[light] = 0;
       }
       else if (server.argName(i) == "g") {
-        rgbw[light][1] = server.arg(i).toInt();
+        rgbw[light][1] = server.arg(i).toInt(); rgbw[light][3] = 0;
         color_mode[light] = 0;
       }
       else if (server.argName(i) == "b") {
-        rgbw[light][2] = server.arg(i).toInt();
-        color_mode[light] = 0;
+        rgbw[light][2] = server.arg(i).toInt(); rgbw[light][3] = 0;
+        color_mode[light] = 0; 
       }
       else if (server.argName(i) == "w") {
-        rgbw[light][3] = server.arg(i).toInt();
+        rgbw[light][3] = server.arg(i).toInt(); rgbw[light][0] = 0; rgbw[light][1] = 0; rgbw[light][2] = 0;
         color_mode[light] = 0;
       }
       else if (server.argName(i) == "x") {
@@ -522,7 +525,9 @@ void setup() {
   });
 
   server.on("/detect", []() {
-    server.send(200, "text/plain", "{\"hue\": \"strip\",\"lights\": " + (String)lightsCount + ",\"modelid\": \"LST001\",\"mac\": \"" + String(mac[5], HEX) + ":"  + String(mac[4], HEX) + ":" + String(mac[3], HEX) + ":" + String(mac[2], HEX) + ":" + String(mac[1], HEX) + ":" + String(mac[0], HEX) + "\"}");
+    char macString[50] = {0};
+    sprintf(macString,"%02X:%02X:%02X:%02X:%02X:%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+    server.send(200, "text/plain", "{\"hue\": \"strip\",\"lights\": " + (String)lightsCount + ",\"modelid\": \"LST002\",\"mac\": \"" + String(macString) + "\"}");
   });
 
   server.on("/", []() {
@@ -688,8 +693,22 @@ void setup() {
   server.begin();
 }
 
+void entertainment() {
+  int packetSize = Udp.parsePacket();
+  if (packetSize) {
+    Udp.read(packetBuffer, packetSize);
+    for (int j = 0; j < pixelCount / lightsCount ; j++)
+    {
+      strip.SetPixelColor(j + packetBuffer[3] * pixelCount / lightsCount, RgbColor(packetBuffer[0], packetBuffer[1], packetBuffer[2]));
+      strip.SetPixelColor(j + packetBuffer[3] * pixelCount / lightsCount, RgbwColor(packetBuffer[0], packetBuffer[1], packetBuffer[2], 0));
+    }
+    strip.Show();
+  }
+}
+
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
   lightEngine();
+  entertainment();
 }
